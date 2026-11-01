@@ -1,0 +1,41 @@
+name: 更新抄底訊號
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: dip-update
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Taipei
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 重算 daily
+        run: python dip_signal.py --mode daily --out desktop.html --data-dir .
+      - name: 建立 Pages 網頁
+        env:
+          WORKFLOW_FILE: update.yml
+        run: python pages_build.py
+      - name: 回存資料
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add -A history.csv meta.json mobile.html widget.html desktop.html *.csv *.json || true
+          git diff --cached --quiet || git commit -m "更新抄底資料 $(date '+%Y-%m-%d %H:%M')"
+          git push
+      - name: 發佈到 gh-pages
+        run: |
+          cd site
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add -A && git commit -qm "deploy $(date '+%Y-%m-%d %H:%M')"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages
