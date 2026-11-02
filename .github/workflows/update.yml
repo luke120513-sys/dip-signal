@@ -1,6 +1,9 @@
 name: 更新抄底訊號
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "30 22 * * 1-5"  # 台北 週二至週六 06:30（美股收盤後）
+    - cron: "0 6 * * 1-5"    # 台北 平日 14:00（台股收盤後）
 permissions:
   contents: write
 concurrency:
