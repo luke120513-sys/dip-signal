@@ -258,50 +258,86 @@ def fetch_twii_mis_today():
     return day, close, meta
 
 
+def merge_twii_official_mis(official, mis):
+    """官方收盤優先：MIS 只能補『晚於最後官方收盤日』的那一天，且標為暫估。
+    official: Series 或 None；mis: (day, close, meta) 或 None。回傳 (Series, provisional_day 或 None)。"""
+    s = official.copy() if official is not None else pd.Series(dtype=float)
+    s.index = pd.to_datetime(s.index).tz_localize(None).normalize() if len(s) else s.index
+    prov = None
+    if mis is not None:
+        day, close, _ = mis
+        day = pd.Timestamp(day).tz_localize(None).normalize() if pd.Timestamp(day).tzinfo else pd.Timestamp(day).normalize()
+        last_off = s.index.max() if len(s) else None
+        if last_off is None or day > last_off:
+            s.loc[day] = float(close)
+            prov = day
+    return s.sort_index().astype(float), prov
+
+
 def fetch_twii_close(prefer_mis_only=False):
-    """優先 TWSE（歷史 + MIS 當日／即時），失敗退回 Yahoo ^TWII。
-    回傳 (Series, source_label)。prefer_mis_only=True 時略過整月歷史（盤中輕量）。
-    """
+    """台股加權：TWSE MI_5MINS_HIST 官方收盤優先；MIS 僅補官方尚未公布的當日（暫估），
+    絕不覆蓋官方收盤。失敗退回 Yahoo ^TWII。回傳 (Series, source_label)。"""
     try:
-        if prefer_mis_only:
-            s = None
-            src = "MIS"
-        else:
-            s = fetch_twii_twse(months=9)
-            src = "TWSE"
+        s = None if prefer_mis_only else fetch_twii_twse(months=9)
+        mis = None
         try:
             mis = fetch_twii_mis_today()
-            if mis is not None:
-                day, close, mmeta = mis
-                if s is None:
-                    # 盤中輕量：從 history 會再 merge；這裡先給當日一點
-                    s = pd.Series({day: close}, dtype=float).sort_index()
-                    s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
-                else:
-                    s.loc[day] = close
-                    s = s.sort_index()
-                tag = "即時" if mmeta.get("intraday") else "當日"
-                t = mmeta.get("t") or ""
-                src = f"TWSE+MIS{tag}" + (f" {t}" if t else "")
         except Exception as e:
             print(f"⚠️ TWSE MIS 當日補值失敗：{e}", file=sys.stderr)
             if s is None:
                 raise
-        return s.astype(float), src
+        s, prov = merge_twii_official_mis(s, mis)
+        if s.empty:
+            raise RuntimeError("TWSE 無資料")
+        src = "TWSE 官方收盤"
+        if prov is not None:
+            t = (mis[2].get("t") or "") if mis else ""
+            src += f"＋MIS 暫估 {prov:%m/%d}" + (f" {t}" if t else "")
+        return s, src
     except Exception as e:
         print(f"⚠️ TWSE 台股失敗，改用 Yahoo：{e}", file=sys.stderr)
         raw = download_close(["^TWII"], "8mo")
-        return raw["^TWII"].dropna().astype(float), "Yahoo(可能延遲)"
+        return raw["^TWII"].dropna().astype(float), "Yahoo ^TWII（備援，可能延遲）"
 
 
-def fetch_vix_twii():
-    """VIX（Yahoo）× 台股加權（優先 TWSE）日線；背離只用共同交易日。
-    divergence：0 無／1 背離（台股跌且 VIX 跌≥5%）／2 強背離（台股跌且 VIX 跌≥8%）
-    回傳 (DataFrame, meta_dict)
-    """
-    twii, tw_src = fetch_twii_close()
-    vix = download_close(["^VIX"], "8mo")["^VIX"].dropna().astype(float)
-    # 先在各自有成交的序列上算漲跌%，再對齊，避免休市日被當成 0%
+CBOE_VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+
+
+def last_completed_us_session(now=None):
+    """回傳已收盤的最後美股日期上限：美東 16:15 前，當天不算完成。"""
+    from zoneinfo import ZoneInfo as _Z
+    now = (now or dt.datetime.now(_Z("UTC"))).astimezone(_Z("America/New_York"))
+    d = pd.Timestamp(now.date())
+    return d if (now.hour, now.minute) >= (16, 15) else d - pd.Timedelta(days=1)
+
+
+def only_completed_vix(s, now=None):
+    return s[s.index <= last_completed_us_session(now)]
+
+
+def parse_cboe_vix_csv(text):
+    df = pd.read_csv(io.StringIO(text))
+    df.columns = [c.strip().upper() for c in df.columns]
+    s = pd.Series(df["CLOSE"].astype(float).values, index=pd.to_datetime(df["DATE"], format="%m/%d/%Y").dt.normalize())
+    return s.sort_index().rename("vix")
+
+
+def fetch_vix_close():
+    """美國 VIX 官方收盤：CBOE 歷史 CSV 優先，失敗退 Yahoo ^VIX；只保留已收盤交易日。"""
+    try:
+        r = requests.get(CBOE_VIX_URL, headers=UA, timeout=30); r.raise_for_status()
+        s = parse_cboe_vix_csv(r.text)
+        s = s[s.index >= s.index.max() - pd.Timedelta(days=260)]
+        src = "CBOE 官方"
+    except Exception as e:
+        print(f"⚠️ CBOE VIX 失敗，改用 Yahoo：{e}", file=sys.stderr)
+        s = download_close(["^VIX"], "8mo")["^VIX"].dropna().astype(float)
+        src = "Yahoo ^VIX（CBOE 備援）"
+    return only_completed_vix(s.dropna().astype(float)), src
+
+
+def build_vt(vix, twii):
+    """各自市場序列先算 pct_change，再依共同日期對齊；只有兩邊都有值才判定背離。"""
     vix_chg = vix.pct_change() * 100
     twii_chg = twii.pct_change() * 100
     df = pd.DataFrame({"vix": vix, "twii": twii, "vix_chg": vix_chg, "twii_chg": twii_chg})
@@ -310,17 +346,25 @@ def fetch_vix_twii():
     down = both & (df["twii_chg"] < 0)
     div = div.mask(down & (df["vix_chg"] <= -VIX_DIV_TH), 1)
     div = div.mask(down & (df["vix_chg"] <= -VIX_STRONG_TH), 2)
-    # 沒有共同交易日的列不要標 0（保持 NaN），避免休市日顯示「無背離」假象
-    div = div.where(both)
-    df["divergence"] = div
-    df = df.round({"vix": 2, "twii": 2, "vix_chg": 2, "twii_chg": 2})
+    df["divergence"] = div.where(both)
+    return df.round({"vix": 2, "twii": 2, "vix_chg": 2, "twii_chg": 2})
+
+
+def fetch_vix_twii():
+    """VIX（Yahoo）× 台股加權（優先 TWSE）日線；背離只用共同交易日。
+    divergence：0 無／1 背離（台股跌且 VIX 跌≥5%）／2 強背離（台股跌且 VIX 跌≥8%）
+    回傳 (DataFrame, meta_dict)
+    """
+    twii, tw_src = fetch_twii_close()
+    vix, vix_src = fetch_vix_close()
+    df = build_vt(vix, twii)
     vix_latest = df["vix"].dropna()
     tw_latest = df["twii"].dropna()
     both_df = df.dropna(subset=["vix_chg", "twii_chg"])
     judge = both_df.index[-1] if not both_df.empty else None
     meta = {
         "twii_source": tw_src,
-        "vix_source": "Yahoo",
+        "vix_source": vix_src,
         "vix_latest": vix_latest.index[-1] if len(vix_latest) else None,
         "twii_latest": tw_latest.index[-1] if len(tw_latest) else None,
         "judge_date": judge,
@@ -376,12 +420,12 @@ def vix_twii_block(vt, compact, vt_meta=None):
     tw_d = tw_latest.index[-1] if len(tw_latest) else None
     tw_ds = f"{tw_d:%m/%d}" if tw_d is not None else "—"
     vix_ds = f"{vix_d:%m/%d}" if vix_d is not None else "—"
-    latest_line = f"台股最新 {tw_ds}｜VIX 最新 {vix_ds}"
+    latest_line = f"台股最新 {tw_ds}｜美國 VIX 最新 {vix_ds}（{html.escape(str(vt_meta.get('vix_source') or 'CBOE'))}，非台指 VIX）"
     src = vt_meta.get("twii_source") or "—"
     delay = "" if src.startswith("TWSE") else "｜資料可能延遲"
     if both.empty:
         wait = vt_meta.get("wait") or "尚無共同交易日"
-        return f"<div class='vt'><div class='bh'><span>⚡ VIX × 台股背離</span><span class='dtag wait'>{wait}</span></div><div class='m'>{latest_line}｜來源 {html.escape(src)}{delay}</div></div>"
+        return f"<div class='vt'><div class='bh'><span>⚡ 美國 VIX（CBOE）× 台股背離</span><span class='dtag wait'>{wait}</span></div><div class='m'>{latest_line}｜來源 {html.escape(src)}{delay}</div></div>"
     r = both.iloc[-1]; d = both.index[-1]
     lv = 0 if pd.isna(r.divergence) else int(r.divergence)
     wait = vt_meta.get("wait")
@@ -407,14 +451,14 @@ def vix_twii_block(vt, compact, vt_meta=None):
     chart = spark(list(h60.vix_chg), lo_band=-VIX_DIV_TH, w=w, h=h, color="#ff8a80") if len(h60) >= 2 else ""
     foot = f"判定日 {d:%Y-%m-%d}｜{latest_line}｜台股來源 {html.escape(src)}{delay}｜{sync_note}｜門檻：台跌且 VIX 跌≥{VIX_DIV_TH:.0f}%／≥{VIX_STRONG_TH:.0f}%｜不影響美股條件"
     if compact:
-        return f"""<div class='vt'><div class='bh'><span>⚡ VIX × 台股背離</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
+        return f"""<div class='vt'><div class='bh'><span>⚡ 美國 VIX（CBOE）× 台股背離</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
 <div class='bv'><div><small>判定日</small><b style='color:#c9d1d9'>{d:%m/%d}</b><small>共同交易日</small></div>
-<div><small>VIX 該日</small><b style='color:#ff8a80'>{vix_px:.1f}</b><small>{vix_s}</small></div>
+<div><small>美國 VIX 該日</small><b style='color:#ff8a80'>{vix_px:.1f}</b><small>{vix_s}</small></div>
 <div><small>台股 該日</small><b style='color:#4fc3f7'>{tw_px:,.0f}</b><small>{tw_s}</small></div></div>
 {chart}<div class='m'>{latest_line}｜{html.escape(src)}{delay}</div></div>"""
-    return f"""<div class='vt'><div class='bh'><span>⚡ VIX × 台股背離（參考）</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
+    return f"""<div class='vt'><div class='bh'><span>⚡ 美國 VIX（CBOE）× 台股背離（參考）</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
 <div class='bv'><div><small>判定日（共同交易日）</small><b>{d:%Y-%m-%d}</b><small>{sync_note}</small></div>
-<div><small>VIX 該日收盤</small><b style='color:#ff8a80'>{vix_px:.2f}</b><small>{vix_s}</small></div>
+<div><small>美國 VIX 該日收盤</small><b style='color:#ff8a80'>{vix_px:.2f}</b><small>{vix_s}</small></div>
 <div><small>台股加權該日收盤</small><b style='color:#4fc3f7'>{tw_px:,.0f}</b><small>{tw_s}</small></div></div>
 {chart}<div class='m'>{foot}</div></div>"""
 
@@ -490,7 +534,7 @@ td,th{{padding:8px 12px;text-align:right;border-bottom:1px solid #21262d;font-va
 <div class="grid">{cards}</div><div class="card" style="margin-top:18px">{vix_twii_block(vt, False, vt_meta)}</div><div class="card" style="margin-top:18px">{btc_block(btc, False)}</div>
 <div class="muted" style="margin-top:10px">小圖為近 {len(h60)} 個交易日走勢，紅色區域為觸發區。</div>
 <table><tr><th>日期</th><th>SPX 站上20MA</th><th>NDX 站上20MA</th><th>SPX 回撤</th><th>NDX 回撤</th><th>訊號</th></tr>{rows}</table>
-<p class="muted">資料來源：成分股清單 Wikipedia；美股／VIX Yahoo Finance；台股加權優先證交所 TWSE（MI_5MINS_HIST／MIS），失敗才退 Yahoo ^TWII。回撤以 252 交易日收盤最高價計算。歷史寬度以「目前」成分股回推，有存活者偏差。僅供參考，非投資建議。</p>
+<p class="muted">資料來源：成分股清單 Wikipedia；美股 Yahoo Finance；美國 VIX 用 CBOE 官方收盤（失敗退 Yahoo ^VIX，非台指 VIX）；台股加權用證交所 TWSE 官方收盤（MI_5MINS_HIST），MIS 只作官方未公布當日暫估，失敗才退 Yahoo ^TWII。回撤以 252 交易日收盤最高價計算。歷史寬度以「目前」成分股回推，有存活者偏差。僅供參考，非投資建議。</p>
 </div></body></html>"""
     tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f: f.write(page)
@@ -580,6 +624,19 @@ def run_daily(out_html, data_dir):
           f"SPX回撤 {r.spx_dd:.1f}% NDX回撤 {r.ndx_dd:.1f}% 條件 {met}/4 → {label}；缺資料 {meta.get('missing', '?')} 檔")
 
 
+def intraday_view(old, twii_live):
+    """以 history 已定案資料為底，只在記憶體中加上 history 沒有的台股暫估日。"""
+    prev_tw = old["twii"].dropna().astype(float) if "twii" in old.columns else pd.Series(dtype=float)
+    new = twii_live[twii_live.index > (prev_tw.index.max() if len(prev_tw) else pd.Timestamp.min)]
+    tw = pd.concat([prev_tw, new]).sort_index()
+    vix = old["vix"].dropna().astype(float) if "vix" in old.columns else pd.Series(dtype=float)
+    vt = build_vt(vix, tw)
+    view = old.copy().reindex(old.index.union(vt.index))
+    for c in VT_COLS:
+        view[c] = vt[c]
+    return view
+
+
 def run_intraday(out_html, data_dir, force=False):
     now = dt.datetime.now(TPE)
     if not force and not in_tw_session(now):
@@ -592,27 +649,10 @@ def run_intraday(out_html, data_dir, force=False):
     meta = load_meta(meta_path)
     # 輕量：MIS 即時台股 + Yahoo VIX；不重抓美股寬度／BTC
     twii, tw_src = fetch_twii_close(prefer_mis_only=True)
-    vix = download_close(["^VIX"], "8mo")["^VIX"].dropna().astype(float)
-    vix_chg = vix.pct_change() * 100
-    twii_chg = twii.pct_change() * 100
-    # 若 prefer_mis_only 只有當日一點，pct_change 會 NaN → 從 history 併入舊台股再重算
     old = pd.read_csv(hist_path, index_col=0, parse_dates=True)
-    if "twii" in old.columns:
-        prev_tw = old["twii"].dropna().astype(float)
-        twii = pd.concat([prev_tw, twii]).sort_index()
-        twii = twii[~twii.index.duplicated(keep="last")]
-        twii_chg = twii.pct_change() * 100
-    df = pd.DataFrame({"vix": vix, "twii": twii, "vix_chg": vix_chg, "twii_chg": twii_chg})
-    both = df["vix_chg"].notna() & df["twii_chg"].notna()
-    div = pd.Series(0, index=df.index, dtype=int)
-    down = both & (df["twii_chg"] < 0)
-    div = div.mask(down & (df["vix_chg"] <= -VIX_DIV_TH), 1)
-    div = div.mask(down & (df["vix_chg"] <= -VIX_STRONG_TH), 2)
-    div = div.where(both)
-    df["divergence"] = div
-    df = df.round({"vix": 2, "twii": 2, "vix_chg": 2, "twii_chg": 2})
-    vt_meta = {"twii_source": tw_src, "vix_source": "Yahoo", "mode": "intraday"}
-    hist = update_csv(df[VT_COLS], hist_path, overwrite_cols=VT_COLS)
+    # 盤中結果只用於畫面，不寫回 history（避免暫估值污染已定案收盤）
+    hist = intraday_view(old, twii)
+    vt_meta = {"twii_source": tw_src + "（盤中，不寫入歷史）", "vix_source": "history（CBOE 已收盤）", "mode": "intraday"}
     us, btc, vt_full, vt_meta, sig, met, label = rebuild_outputs(data_dir, out_html, hist, meta, vt_meta)
     vt = vt_full.dropna(subset=["vix_chg", "twii_chg"]) if vt_full is not None else None
     live = twii.dropna()
