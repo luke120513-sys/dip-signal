@@ -12,7 +12,7 @@
   rebuild：不抓新數據，只依 history/meta 重繪桌面／widget／mobile
   背離判定永遠只用共同交易日（判定日），不改回各自最新日
 """
-import argparse, html, io, os, sys, datetime as dt
+import argparse, html, io, os, re, sys, datetime as dt
 from zoneinfo import ZoneInfo
 import pandas as pd, requests, yfinance as yf
 
@@ -336,6 +336,98 @@ def fetch_vix_close():
     return only_completed_vix(s.dropna().astype(float)), src
 
 
+TAIFEX_VIX_MONTH = "https://www.taifex.com.tw/file/taifex/Dailydownload/vix/log2data/{ym}new.txt"
+TAIFEX_VIX_LIVE = "https://mis.taifex.com.tw/futures/api/getQuoteListVIX"
+
+
+def parse_taifex_vix_month(text):
+    """期交所『前3個月每日收盤之臺指選擇權波動率指數』月檔：取 13:45 的『臺指選擇權波動率指數』欄為官方收盤。"""
+    out = {}
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) >= 3 and re.fullmatch(r"\d{8}", f[0]):
+            try:
+                out[pd.Timestamp(f[0])] = float(f[2])
+            except ValueError:
+                pass
+    return pd.Series(out, dtype=float).sort_index()
+
+
+def fetch_tvix_official(months=9):
+    now = dt.datetime.now(TPE); ser = []
+    for i in range(months):
+        y, m = now.year, now.month - i
+        while m <= 0: m += 12; y -= 1
+        try:
+            r = requests.get(TAIFEX_VIX_MONTH.format(ym=f"{y}{m:02d}"), headers=UA, timeout=30)
+            if r.status_code != 200: continue
+            ser.append(parse_taifex_vix_month(r.content.decode("cp950", errors="ignore")))
+        except Exception as e:
+            print(f"⚠️ 期交所 VIX 月檔 {y}{m:02d} 失敗：{e}", file=sys.stderr)
+    ser = [x for x in ser if len(x)]
+    if not ser:
+        raise RuntimeError("期交所臺指 VIX 官方收盤抓不到")
+    out = pd.concat(ser).sort_index()
+    return out[~out.index.duplicated(keep="last")].rename("tvix")
+
+
+def fetch_tvix_live():
+    """期交所 MIS 臺指選擇權波動率指數即時行情。回傳 dict 或 None。"""
+    r = requests.post(TAIFEX_VIX_LIVE, json={"SortColumn": "", "AscDesc": "A"}, headers=UA, timeout=20)
+    r.raise_for_status(); j = r.json()
+    q = [x for x in (j.get("RtData") or {}).get("QuoteList") or [] if x.get("SymbolID") == "TAIWANVIX"]
+    if j.get("RtCode") != "0" or not q:
+        return None
+    q = q[0]
+    return {"date": pd.Timestamp(q["CDate"]), "time": q["CTime"].zfill(6), "last": float(q["CLastPrice"]), "ref": float(q["CRefPrice"])}
+
+
+def fetch_twii_live():
+    m = fetch_twii_mis_today()
+    if m is None:
+        return None
+    day, close, meta = m
+    t = str(meta.get("t") or "").replace(":", "")
+    return {"date": pd.Timestamp(day).normalize(), "time": t.zfill(6) if t else "", "last": close, "ref": meta.get("prev_close")}
+
+
+def _secs(t):
+    t = (t or "").zfill(6); return int(t[:2]) * 3600 + int(t[2:4]) * 60 + int(t[4:6])
+
+
+def live_divergence(tw_off, tvix_off, tw_live, vix_live, max_skew=300):
+    """盤中／收盤後未入檔的暫估背離。分母一律為各自前一個『官方收盤』；
+    日期須相同、晚於兩邊最後官方收盤、時間差在 max_skew 秒內（或兩邊都已收盤），否則不判定。"""
+    res = {"status": "無即時資料"}
+    if not tw_live or not vix_live:
+        return res
+    d = tw_live["date"]
+    res.update(date=d, tw_time=tw_live["time"], vix_time=vix_live["time"], twii=tw_live["last"], tvix=vix_live["last"])
+    if vix_live["date"] != d:
+        res["status"] = "日期不一致，不判定"; return res
+    if (len(tw_off) and d <= tw_off.index.max()) or (len(tvix_off) and d <= tvix_off.index.max()):
+        res["status"] = "已有官方收盤，以官方為準"; return res
+    tw_prev = float(tw_off.iloc[-1]) if len(tw_off) else None
+    vx_prev = float(tvix_off.iloc[-1]) if len(tvix_off) else None
+    if tw_prev is None or vx_prev is None:
+        res["status"] = "缺前一官方收盤，不判定"; return res
+    if vix_live.get("ref") is not None and abs(vix_live["ref"] - vx_prev) > 0.011:
+        res["status"] = f"期交所參考價 {vix_live['ref']} 與官方前收 {vx_prev} 不符，不判定"; return res
+    try:
+        tws, vxs = _secs(res["tw_time"]), _secs(res["vix_time"])
+    except Exception:
+        res["status"] = "時間戳缺失，不判定"; return res
+    closed = tws >= _secs("133000") and vxs >= _secs("134500")
+    if not closed and abs(tws - vxs) > max_skew:
+        res["status"] = f"時間差 {abs(tws - vxs)} 秒，不判定"; return res
+    twc = (tw_live["last"] / tw_prev - 1) * 100; vxc = (vix_live["last"] / vx_prev - 1) * 100
+    lv = 0
+    if twc < 0 and vxc <= -VIX_DIV_TH: lv = 1
+    if twc < 0 and vxc <= -VIX_STRONG_TH: lv = 2
+    res.update(status="收盤後暫估（官方檔未出）" if closed else "盤中暫估", twii_chg=round(twc, 2), tvix_chg=round(vxc, 2), divergence=lv)
+    return res
+
+
 def build_vt(vix, twii):
     """各自市場序列先算 pct_change，再依共同日期對齊；只有兩邊都有值才判定背離。"""
     vix_chg = vix.pct_change() * 100
@@ -355,8 +447,16 @@ def fetch_vix_twii():
     divergence：0 無／1 背離（台股跌且 VIX 跌≥5%）／2 強背離（台股跌且 VIX 跌≥8%）
     回傳 (DataFrame, meta_dict)
     """
-    twii, tw_src = fetch_twii_close()
-    vix, vix_src = fetch_vix_close()
+    twii = fetch_twii_twse(months=9)  # 只用官方收盤進歷史
+    tw_src = "TWSE 官方收盤"
+    vix = fetch_tvix_official()
+    vix_src = "期交所官方收盤"
+    tw_live = vix_live = None
+    try: tw_live = fetch_twii_live()
+    except Exception as e: print(f"⚠️ TWSE MIS 失敗：{e}", file=sys.stderr)
+    try: vix_live = fetch_tvix_live()
+    except Exception as e: print(f"⚠️ 期交所 MIS VIX 失敗：{e}", file=sys.stderr)
+    live = live_divergence(twii, vix, tw_live, vix_live)
     df = build_vt(vix, twii)
     vix_latest = df["vix"].dropna()
     tw_latest = df["twii"].dropna()
@@ -365,6 +465,7 @@ def fetch_vix_twii():
     meta = {
         "twii_source": tw_src,
         "vix_source": vix_src,
+        "live": live,
         "vix_latest": vix_latest.index[-1] if len(vix_latest) else None,
         "twii_latest": tw_latest.index[-1] if len(tw_latest) else None,
         "judge_date": judge,
@@ -381,9 +482,26 @@ def fetch_vix_twii():
             meta["wait"] = "等待共同交易日"
     else:
         meta["wait"] = "尚無共同交易日"
-    return df, meta
+    return df.rename(columns={v: k for k, v in TW_HIST.items()}), meta
 
-VT_COLS = ["vix", "twii", "vix_chg", "twii_chg", "divergence"]
+VT_COLS = ["vix", "twii", "vix_chg", "twii_chg", "divergence"]  # 畫面內部用名稱（vix＝台指 VIX）
+# history.csv 實際欄位：台指 VIX 與美國 VIX 永遠分欄
+TW_HIST = {"tvix": "vix", "twii": "twii", "tvix_chg": "vix_chg", "twii_chg": "twii_chg", "tw_div": "divergence"}
+TW_HIST_COLS = list(TW_HIST)
+LEGACY_US = {"vix": "us_vix", "vix_chg": "us_vix_chg", "divergence": "us_divergence"}
+
+
+def migrate_hist(h):
+    """舊版 vix/vix_chg/divergence 是美國 CBOE VIX，改名為 us_*，不得與台指 VIX 混用。"""
+    ren = {k: v for k, v in LEGACY_US.items() if k in h.columns and v not in h.columns}
+    return h.rename(columns=ren)
+
+
+def vt_from_hist(h):
+    h = migrate_hist(h)
+    if not set(TW_HIST_COLS) <= set(h.columns):
+        return None
+    return h[TW_HIST_COLS].rename(columns=TW_HIST)
 US_COLS = ["spx_breadth", "ndx_breadth", "spx_dd", "ndx_dd"]
 BTC_COLS = ["btc_price", "btc_vrp", "btc_vmvrv"]
 
@@ -420,12 +538,12 @@ def vix_twii_block(vt, compact, vt_meta=None):
     tw_d = tw_latest.index[-1] if len(tw_latest) else None
     tw_ds = f"{tw_d:%m/%d}" if tw_d is not None else "—"
     vix_ds = f"{vix_d:%m/%d}" if vix_d is not None else "—"
-    latest_line = f"台股最新 {tw_ds}｜美國 VIX 最新 {vix_ds}（{html.escape(str(vt_meta.get('vix_source') or 'CBOE'))}，非台指 VIX）"
+    latest_line = f"台股最新 {tw_ds}｜台指 VIX 最新 {vix_ds}（TAIWAN VIX，{html.escape(str(vt_meta.get('vix_source') or '期交所官方收盤'))}，非美國 VIX）"
     src = vt_meta.get("twii_source") or "—"
     delay = "" if src.startswith("TWSE") else "｜資料可能延遲"
     if both.empty:
         wait = vt_meta.get("wait") or "尚無共同交易日"
-        return f"<div class='vt'><div class='bh'><span>⚡ 美國 VIX（CBOE）× 台股背離</span><span class='dtag wait'>{wait}</span></div><div class='m'>{latest_line}｜來源 {html.escape(src)}{delay}</div></div>"
+        return f"<div class='vt'><div class='bh'><span>⚡ 台指 VIX（期交所）× 台股背離</span><span class='dtag wait'>{wait}</span></div><div class='m'>{latest_line}｜來源 {html.escape(src)}{delay}</div></div>"
     r = both.iloc[-1]; d = both.index[-1]
     lv = 0 if pd.isna(r.divergence) else int(r.divergence)
     wait = vt_meta.get("wait")
@@ -438,6 +556,14 @@ def vix_twii_block(vt, compact, vt_meta=None):
             wait = "等待 VIX 交易日"
         elif vix_d != d or tw_d != d:
             wait = "等待共同交易日"
+    lvd = vt_meta.get("live") or {}
+    if lvd.get("twii_chg") is not None:
+        live_line = (f"<div class='m'>⏱ {html.escape(lvd['status'])} {lvd['date']:%m/%d}｜台股 {lvd['twii']:,.2f}（{lvd['twii_chg']:+.2f}%，MIS {lvd['tw_time'][:2]}:{lvd['tw_time'][2:4]}:{lvd['tw_time'][4:6]}）"
+                     f"｜台指 VIX {lvd['tvix']:.2f}（{lvd['tvix_chg']:+.2f}%，期交所 MIS {lvd['vix_time'][:2]}:{lvd['vix_time'][2:4]}:{lvd['vix_time'][4:6]}）→ {div_label(lvd['divergence'])}（暫估，未寫入歷史）</div>")
+    elif lvd.get("status") and lvd.get("status") not in ("已有官方收盤，以官方為準", "無即時資料"):
+        live_line = f"<div class='m'>⏱ 即時：{html.escape(lvd['status'])}</div>"
+    else:
+        live_line = ""
     tag = div_label(lv)
     cls = {0: "none", 1: "div", 2: "strong"}[lv]
     wait_badge = f" <span class='dtag wait'>{html.escape(wait)}</span>" if wait else ""
@@ -449,22 +575,22 @@ def vix_twii_block(vt, compact, vt_meta=None):
     h60 = both.tail(60)
     w, h = (300, 34) if compact else (1100, 110)
     chart = spark(list(h60.vix_chg), lo_band=-VIX_DIV_TH, w=w, h=h, color="#ff8a80") if len(h60) >= 2 else ""
-    foot = f"判定日 {d:%Y-%m-%d}｜{latest_line}｜台股來源 {html.escape(src)}{delay}｜{sync_note}｜門檻：台跌且 VIX 跌≥{VIX_DIV_TH:.0f}%／≥{VIX_STRONG_TH:.0f}%｜不影響美股條件"
+    foot = f"判定日 {d:%Y-%m-%d}｜{latest_line}｜台股來源 {html.escape(src)}{delay}｜{sync_note}｜門檻（暫定）：台股跌且台指 VIX 跌≥{VIX_DIV_TH:.0f}%／≥{VIX_STRONG_TH:.0f}%，各自對前一官方收盤｜不影響美股條件"
     if compact:
-        return f"""<div class='vt'><div class='bh'><span>⚡ 美國 VIX（CBOE）× 台股背離</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
+        return f"""<div class='vt'><div class='bh'><span>⚡ 台指 VIX（期交所）× 台股背離</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
 <div class='bv'><div><small>判定日</small><b style='color:#c9d1d9'>{d:%m/%d}</b><small>共同交易日</small></div>
-<div><small>美國 VIX 該日</small><b style='color:#ff8a80'>{vix_px:.1f}</b><small>{vix_s}</small></div>
+<div><small>台指 VIX 該日</small><b style='color:#ff8a80'>{vix_px:.1f}</b><small>{vix_s}</small></div>
 <div><small>台股 該日</small><b style='color:#4fc3f7'>{tw_px:,.0f}</b><small>{tw_s}</small></div></div>
-{chart}<div class='m'>{latest_line}｜{html.escape(src)}{delay}</div></div>"""
-    return f"""<div class='vt'><div class='bh'><span>⚡ 美國 VIX（CBOE）× 台股背離（參考）</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
+{chart}<div class='m'>{latest_line}｜{html.escape(src)}{delay}</div>{live_line}</div>"""
+    return f"""<div class='vt'><div class='bh'><span>⚡ 台指 VIX（期交所）× 台股背離（參考）</span><span><span class='dtag {cls}'>{tag}</span>{wait_badge}</span></div>
 <div class='bv'><div><small>判定日（共同交易日）</small><b>{d:%Y-%m-%d}</b><small>{sync_note}</small></div>
-<div><small>美國 VIX 該日收盤</small><b style='color:#ff8a80'>{vix_px:.2f}</b><small>{vix_s}</small></div>
+<div><small>台指 VIX 該日收盤</small><b style='color:#ff8a80'>{vix_px:.2f}</b><small>{vix_s}</small></div>
 <div><small>台股加權該日收盤</small><b style='color:#4fc3f7'>{tw_px:,.0f}</b><small>{tw_s}</small></div></div>
-{chart}<div class='m'>{foot}</div></div>"""
+{chart}<div class='m'>{foot}</div>{live_line}</div>"""
 
 def update_csv(df, path, overwrite_cols=None):
     if os.path.exists(path):
-        old = pd.read_csv(path, index_col=0, parse_dates=True)
+        old = migrate_hist(pd.read_csv(path, index_col=0, parse_dates=True))
         # 這些欄位每次重算，避免舊的 pad/0% 髒值經 combine_first 回流
         if overwrite_cols:
             old = old.drop(columns=[c for c in overwrite_cols if c in old.columns], errors="ignore")
@@ -534,7 +660,7 @@ td,th{{padding:8px 12px;text-align:right;border-bottom:1px solid #21262d;font-va
 <div class="grid">{cards}</div><div class="card" style="margin-top:18px">{vix_twii_block(vt, False, vt_meta)}</div><div class="card" style="margin-top:18px">{btc_block(btc, False)}</div>
 <div class="muted" style="margin-top:10px">小圖為近 {len(h60)} 個交易日走勢，紅色區域為觸發區。</div>
 <table><tr><th>日期</th><th>SPX 站上20MA</th><th>NDX 站上20MA</th><th>SPX 回撤</th><th>NDX 回撤</th><th>訊號</th></tr>{rows}</table>
-<p class="muted">資料來源：成分股清單 Wikipedia；美股 Yahoo Finance；美國 VIX 用 CBOE 官方收盤（失敗退 Yahoo ^VIX，非台指 VIX）；台股加權用證交所 TWSE 官方收盤（MI_5MINS_HIST），MIS 只作官方未公布當日暫估，失敗才退 Yahoo ^TWII。回撤以 252 交易日收盤最高價計算。歷史寬度以「目前」成分股回推，有存活者偏差。僅供參考，非投資建議。</p>
+<p class="muted">資料來源：成分股清單 Wikipedia；美股 Yahoo Finance；背離用期交所臺指選擇權波動率指數（TAIWAN VIX）官方收盤，盤中暫估用期交所／證交所 MIS（不寫入歷史，非美國 VIX）；台股加權用證交所 TWSE 官方收盤（MI_5MINS_HIST），MIS 只作官方未公布當日暫估，失敗才退 Yahoo ^TWII。回撤以 252 交易日收盤最高價計算。歷史寬度以「目前」成分股回推，有存活者偏差。僅供參考，非投資建議。</p>
 </div></body></html>"""
     tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f: f.write(page)
@@ -584,7 +710,7 @@ def rebuild_outputs(data_dir, out_html, hist, meta, vt_meta):
     meta = dict(meta)
     meta["date"] = us.index[-1]
     btc = hist.dropna(subset=BTC_COLS) if set(BTC_COLS) <= set(hist.columns) else None
-    vt_full = hist.reindex(columns=VT_COLS) if set(VT_COLS) <= set(hist.columns) else None
+    vt_full = vt_from_hist(hist)
     vt_meta = refresh_vt_meta(vt_full, vt_meta)
     sig, met, label = render(us, meta, out_html, btc, vt_full, vt_meta)
     render_widget(us, meta, os.path.join(data_dir, "widget.html"), btc, vt_full, vt_meta)
@@ -608,7 +734,7 @@ def run_daily(out_html, data_dir):
         df = df.join(vt_df, how="outer")
     except Exception as e:
         print(f"⚠️ VIX/台股 取得失敗：{e}", file=sys.stderr)
-    hist = update_csv(df, os.path.join(data_dir, "history.csv"), overwrite_cols=VT_COLS + BTC_COLS)
+    hist = update_csv(df, os.path.join(data_dir, "history.csv"), overwrite_cols=TW_HIST_COLS + BTC_COLS)
     save_meta(os.path.join(data_dir, "meta.json"), meta)
     us, btc, vt_full, vt_meta, sig, met, label = rebuild_outputs(data_dir, out_html, hist, meta, vt_meta)
     r = us.iloc[-1]
@@ -624,19 +750,6 @@ def run_daily(out_html, data_dir):
           f"SPX回撤 {r.spx_dd:.1f}% NDX回撤 {r.ndx_dd:.1f}% 條件 {met}/4 → {label}；缺資料 {meta.get('missing', '?')} 檔")
 
 
-def intraday_view(old, twii_live):
-    """以 history 已定案資料為底，只在記憶體中加上 history 沒有的台股暫估日。"""
-    prev_tw = old["twii"].dropna().astype(float) if "twii" in old.columns else pd.Series(dtype=float)
-    new = twii_live[twii_live.index > (prev_tw.index.max() if len(prev_tw) else pd.Timestamp.min)]
-    tw = pd.concat([prev_tw, new]).sort_index()
-    vix = old["vix"].dropna().astype(float) if "vix" in old.columns else pd.Series(dtype=float)
-    vt = build_vt(vix, tw)
-    view = old.copy().reindex(old.index.union(vt.index))
-    for c in VT_COLS:
-        view[c] = vt[c]
-    return view
-
-
 def run_intraday(out_html, data_dir, force=False):
     now = dt.datetime.now(TPE)
     if not force and not in_tw_session(now):
@@ -648,15 +761,22 @@ def run_intraday(out_html, data_dir, force=False):
         raise RuntimeError("缺少 history.csv 或 meta.json，請先跑一次 --mode daily")
     meta = load_meta(meta_path)
     # 輕量：MIS 即時台股 + Yahoo VIX；不重抓美股寬度／BTC
-    twii, tw_src = fetch_twii_close(prefer_mis_only=True)
-    old = pd.read_csv(hist_path, index_col=0, parse_dates=True)
-    # 盤中結果只用於畫面，不寫回 history（避免暫估值污染已定案收盤）
-    hist = intraday_view(old, twii)
-    vt_meta = {"twii_source": tw_src + "（盤中，不寫入歷史）", "vix_source": "history（CBOE 已收盤）", "mode": "intraday"}
+    hist = migrate_hist(pd.read_csv(hist_path, index_col=0, parse_dates=True))
+    tw_off = hist["twii"].dropna() if "twii" in hist.columns else pd.Series(dtype=float)
+    vx_off = hist["tvix"].dropna() if "tvix" in hist.columns else pd.Series(dtype=float)
+    tw_live = vix_live = None
+    try: tw_live = fetch_twii_live()
+    except Exception as e: print(f"⚠️ TWSE MIS 失敗：{e}", file=sys.stderr)
+    try: vix_live = fetch_tvix_live()
+    except Exception as e: print(f"⚠️ 期交所 MIS VIX 失敗：{e}", file=sys.stderr)
+    # 盤中結果只放畫面，不寫回 history
+    vt_meta = {"twii_source": "TWSE 官方收盤", "vix_source": "期交所官方收盤", "mode": "intraday",
+               "live": live_divergence(tw_off, vx_off, tw_live, vix_live)}
+    tw_src = "MIS"
     us, btc, vt_full, vt_meta, sig, met, label = rebuild_outputs(data_dir, out_html, hist, meta, vt_meta)
     vt = vt_full.dropna(subset=["vix_chg", "twii_chg"]) if vt_full is not None else None
-    live = twii.dropna()
-    live_s = f"{live.index[-1]:%Y-%m-%d} {float(live.iloc[-1]):,.2f}" if len(live) else "—"
+    lv = vt_meta.get("live") or {}
+    live_s = f"{lv.get('status')} 台 {lv.get('twii_chg')}% 台指VIX {lv.get('tvix_chg')}%"
     if vt is not None and not vt.empty:
         v = vt.iloc[-1]
         w = vt_meta.get("wait") or "已對齊"
@@ -672,7 +792,7 @@ def run_rebuild(out_html, data_dir):
         raise RuntimeError("缺少 history.csv 或 meta.json，請先跑一次 --mode daily")
     meta = load_meta(meta_path)
     hist = pd.read_csv(hist_path, index_col=0, parse_dates=True)
-    vt_full = hist.reindex(columns=VT_COLS) if set(VT_COLS) <= set(hist.columns) else None
+    vt_full = vt_from_hist(hist)
     vt_meta = refresh_vt_meta(vt_full, {"mode": "rebuild"})
     us, btc, vt_full, vt_meta, sig, met, label = rebuild_outputs(data_dir, out_html, hist, meta, vt_meta)
     print(f"[{dt.datetime.now(TPE):%Y-%m-%d %H:%M} 台北] rebuild｜資料 {meta['date']:%Y-%m-%d} 條件 {met}/4 → {label}")

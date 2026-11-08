@@ -1,55 +1,64 @@
-import datetime as dt, os, sys
-from zoneinfo import ZoneInfo
+import os, sys
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dip_signal as d
-
 T = pd.Timestamp
 
-def test_official_close_beats_stale_mis():
-    off = pd.Series({T("2026-11-05"): 41574.72, T("2026-11-06"): 39701.64})
-    s, prov = d.merge_twii_official_mis(off, (T("2026-11-06"), 39690.74, {"t": "13:19:50"}))
+MONTH = """交易日期\t時間(時/分/秒/毫秒)\t臺指選擇權波動率指數\t收盤前1分鐘平均指數
+--------\t-------------------\t--------------------\t-------------------
+20261105\t13450000\t\t\t39.92\t\t39.93
+20261106\t13450000\t\t\t46.52\t\t46.62
+"""
+TW = pd.Series({T("2026-11-05"): 41574.72, T("2026-11-06"): 39701.64})
+VX = pd.Series({T("2026-11-05"): 39.92, T("2026-11-06"): 46.52})
+
+def test_parse_taifex_official_close_uses_1345_value():
+    s = d.parse_taifex_vix_month(MONTH)
+    assert s[T("2026-11-06")] == 46.52 and s[T("2026-11-05")] == 39.92
+
+def test_official_1106_previous_close_denominator():
+    r = d.build_vt(VX, TW).loc[T("2026-11-06")]
+    assert r.vix_chg == 16.53 and r.twii_chg == -4.51 and r.divergence == 0
+
+def test_legacy_us_vix_never_mixed():
+    h = pd.DataFrame({"vix": [28.18], "vix_chg": [69.66], "divergence": [0.0], "twii": [41574.72]}, index=[T("2026-11-05")])
+    m = d.migrate_hist(h)
+    assert "vix" not in m.columns and m.loc[T("2026-11-05"), "us_vix"] == 28.18
+    assert d.vt_from_hist(m) is None  # 沒有台指 VIX 欄就不畫，不拿美國 VIX 頂替
+
+def test_shared_dates_only():
+    vx = pd.Series({T("2026-11-05"): 39.92, T("2026-11-07"): 40.0})
+    df = d.build_vt(vx, TW)
+    assert pd.isna(df.loc[T("2026-11-06"), "divergence"])
+
+def L(date, t, last, ref=None):
+    return {"date": T(date), "time": t, "last": last, "ref": ref}
+
+def test_live_aligned_uses_previous_official_close():
+    r = d.live_divergence(TW, VX, L("2026-11-09", "100000", 38000.0), L("2026-11-09", "100015", 41.0, 46.52))
+    assert r["status"] == "盤中暫估" and r["tvix_chg"] == round((41 / 46.52 - 1) * 100, 2)
+    assert r["twii_chg"] == round((38000 / 39701.64 - 1) * 100, 2) and r["divergence"] == 2
+
+def test_live_time_skew_suppressed():
+    r = d.live_divergence(TW, VX, L("2026-11-09", "100000", 38000.0), L("2026-11-09", "101500", 41.0, 46.52))
+    assert "twii_chg" not in r and "不判定" in r["status"]
+
+def test_stale_mis_same_as_official_day_suppressed():
+    r = d.live_divergence(TW, VX, L("2026-11-06", "131950", 39690.74), L("2026-11-06", "134500", 46.52, 39.92))
+    assert "twii_chg" not in r and "官方" in r["status"]
+
+def test_date_mismatch_or_missing_suppressed():
+    assert "twii_chg" not in d.live_divergence(TW, VX, L("2026-11-09", "100000", 1.0), L("2026-11-06", "134500", 46.52, 39.92))
+    assert "twii_chg" not in d.live_divergence(TW, VX, None, L("2026-11-09", "100000", 41.0, 46.52))
+
+def test_ref_mismatch_suppressed():
+    r = d.live_divergence(TW, VX, L("2026-11-09", "100000", 38000.0), L("2026-11-09", "100000", 41.0, 40.0))
+    assert "twii_chg" not in r
+
+def test_after_close_skew_allowed():
+    r = d.live_divergence(TW, VX, L("2026-11-09", "133000", 38000.0), L("2026-11-09", "134500", 41.0, 46.52))
+    assert r["status"].startswith("收盤後暫估")
+
+def test_official_tw_close_beats_mis():
+    s, prov = d.merge_twii_official_mis(TW, (T("2026-11-06"), 39690.74, {}))
     assert s[T("2026-11-06")] == 39701.64 and prov is None
-
-def test_stale_mis_older_day_ignored():
-    off = pd.Series({T("2026-11-06"): 39701.64})
-    s, prov = d.merge_twii_official_mis(off, (T("2026-11-05"), 1.0, {}))
-    assert s[T("2026-11-06")] == 39701.64 and T("2026-11-05") not in s.index and prov is None
-
-def test_mis_only_fills_new_day_as_provisional():
-    off = pd.Series({T("2026-11-06"): 39701.64})
-    s, prov = d.merge_twii_official_mis(off, (T("2026-11-09"), 40000.0, {}))
-    assert prov == T("2026-11-09") and s[T("2026-11-09")] == 40000.0
-
-def test_cboe_parse_and_known_values():
-    txt = "DATE,OPEN,HIGH,LOW,CLOSE\n10/29/2026,17.15,17.36,16.21,17.20\n10/30/2026,18.43,23.93,18.03,19.42\n11/02/2026,19.05,21.77,18.03,21.15\n11/05/2026,17.14,28.36,16.70,28.18\n11/06/2026,27.68,27.76,23.47,25.64\n"
-    s = d.parse_cboe_vix_csv(txt)
-    assert s[T("2026-11-02")] == 21.15 and s[T("2026-10-30")] == 19.42
-    assert round((s.pct_change() * 100)[T("2026-11-06")], 2) == -9.01
-
-def test_unclosed_us_session_excluded():
-    s = pd.Series({T("2026-11-05"): 28.18, T("2026-11-06"): 25.0})
-    now = dt.datetime(2026, 11, 6, 12, 0, tzinfo=ZoneInfo("America/New_York"))
-    assert list(d.only_completed_vix(s, now).index) == [T("2026-11-05")]
-    now2 = dt.datetime(2026, 11, 6, 16, 30, tzinfo=ZoneInfo("America/New_York"))
-    assert len(d.only_completed_vix(s, now2)) == 2
-
-def test_own_market_pct_then_shared_dates():
-    vix = pd.Series({T("2026-10-30"): 19.42, T("2026-11-02"): 21.15})  # 無 10/31
-    tw = pd.Series({T("2026-10-30"): 45211.83, T("2026-10-31"): 45000.0, T("2026-11-02"): 44920.14})
-    df = d.build_vt(vix, tw)
-    assert round(df.loc[T("2026-11-02"), "vix_chg"], 2) == 8.91  # 對 10/30，非 0
-    assert pd.isna(df.loc[T("2026-10-31"), "divergence"])
-
-def test_strong_divergence_1106():
-    vix = pd.Series({T("2026-11-05"): 28.18, T("2026-11-06"): 25.64})
-    tw = pd.Series({T("2026-11-05"): 41574.72, T("2026-11-06"): 39701.64})
-    r = d.build_vt(vix, tw).loc[T("2026-11-06")]
-    assert r.twii_chg == -4.51 and r.vix_chg == -9.01 and r.divergence == 2
-
-def test_intraday_view_does_not_override_history():
-    old = pd.DataFrame({"vix": [28.18, 25.64], "twii": [41574.72, 39701.64]}, index=[T("2026-11-05"), T("2026-11-06")])
-    live = pd.Series({T("2026-11-06"): 1.0, T("2026-11-09"): 40000.0})
-    v = d.intraday_view(old, live)
-    assert v.loc[T("2026-11-06"), "twii"] == 39701.64 and v.loc[T("2026-11-09"), "twii"] == 40000.0
-    assert pd.isna(v.loc[T("2026-11-09"), "divergence"])
