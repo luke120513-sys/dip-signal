@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0d1117">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="static/icon-192.png">
+<title>抄底訊號 · 尚未觸發</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #0d1117; color: #e6edf3;
+  font-family: -apple-system, "PingFang TC", "Heiti TC", sans-serif;
+  padding: 16px 14px 120px;
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 480px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.muted { color: #8b949e; font-size: 13px; line-height: 1.4; }
+.hero {
+  display: flex; gap: 14px; align-items: center;
+  background: #161b22; border: 1px solid #30363d; border-radius: 16px;
+  padding: 16px; margin: 14px 0;
+}
+.dot {
+  width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
+  background: #ff5252; box-shadow: 0 0 22px #ff5252;
+}
+.status { font-size: 26px; font-weight: 800; line-height: 1.2; }
+.card {
+  background: #161b22; border: 1px solid #30363d; border-radius: 14px;
+  padding: 14px; margin: 10px 0;
+}
+.card.ok { border-color: #00e676; }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.t { font-size: 15px; color: #c9d1d9; }
+.badge {
+  font-size: 12px; padding: 2px 8px; border-radius: 999px;
+  background: #3d1f1f; color: #ff8a80; white-space: nowrap;
+}
+.ok .badge { background: #12321f; color: #69f0ae; }
+.big {
+  font-size: 40px; font-weight: 800; letter-spacing: -1px;
+  font-variant-numeric: tabular-nums; margin: 4px 0;
+}
+.gap { font-size: 15px; color: #ffd740; }
+.ok .gap { color: #69f0ae; }
+.chart svg { width: 100%; height: 56px; display: block; background: #0d1117; border-radius: 8px; }
+.btc .bv, .vt .bv { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.btc .bv small, .vt .bv small { display: block; color: #8b949e; font-size: 12px; }
+.btc .bv b, .vt .bv b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.btc svg, .vt svg { width: 100%; height: 72px; background: #0d1117; border-radius: 8px; }
+.bh { display: flex; justify-content: space-between; align-items: center; font-size: 16px; gap: 8px; }
+.pos { font-weight: 700; } .up { color: #69f0ae; } .dn { color: #ff8a80; }
+.dtag { font-size: 13px; padding: 2px 8px; border-radius: 8px; font-weight: 700; }
+.dtag.none { background: #21262d; color: #8b949e; }
+.dtag.div { background: #3d2f1f; color: #ffd740; }
+.dtag.strong { background: #3d1f1f; color: #ff8a80; }
+.dtag.wait { background: #1f2a3d; color: #4fc3f7; }
+.m { color: #8b949e; font-size: 12px; margin-top: 6px; line-height: 1.35; }
+.bar {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  background: rgba(13,17,23,.94); border-top: 1px solid #30363d;
+  padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+  backdrop-filter: blur(10px);
+}
+.bar-inner { max-width: 480px; margin: 0 auto; display: flex; gap: 8px; flex-wrap: wrap; }
+button {
+  flex: 1; border: 0; border-radius: 12px; padding: 14px 12px;
+  font-size: 16px; font-weight: 700; cursor: pointer;
+  min-width: 40%;
+}
+#btnFull { background: #238636; color: #fff; }
+#btnIntra { background: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+#btnInstall { background: #1f6feb; color: #fff; display: none; }
+#btnInstall.show { display: block; }
+#installTip { display: none; width: 100%; margin: 0; font-size: 12px; color: #8b949e; text-align: center; line-height: 1.4; }
+#installTip.show { display: block; }
+button:disabled { opacity: .55; cursor: wait; }
+#toast {
+  display: none; margin-top: 8px; font-size: 13px; color: #8b949e; text-align: center;
+}
+#toast.show { display: block; }
+#toast.err { color: #ff8a80; }
+#toast.ok { color: #69f0ae; }
+.hint { margin: 8px 0 0; font-size: 12px; color: #8b949e; }
+code { background: #21262d; padding: 1px 6px; border-radius: 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📉 抄底訊號</h1>
+  <div class="muted">更新時間：2026-11-14 10:32（台北）｜美股資料日 2026-11-12</div>
+  <div class="hero">
+    <div class="dot" aria-hidden="true"></div>
+    <div>
+      <div class="status">尚未觸發</div>
+      <div class="muted">美股條件 0/4　｜　寬度皆 &lt; 15% 且回撤皆在 10–20%</div>
+    </div>
+  </div>
+  <section class="card ">
+<div class="row"><span class="t">SPX 站上 20MA</span>
+<span class="badge">未達</span></div>
+<div class="big">66.8%</div>
+<div class="gap">還需下降 51.8 點</div>
+<div class="chart"><svg viewBox='0 0 340 56' preserveAspectRatio='none'><rect x='0' y='48.6' width='340' height='7.4' fill='rgba(255,82,82,.13)'/><line x1='0' x2='340' y1='48.6' y2='48.6' stroke='#ff5252' stroke-dasharray='4 4'/><polyline points='6.0,27.2 11.6,24.3 17.1,22.3 22.7,23.3 28.2,21.6 33.8,28.0 39.4,29.1 44.9,31.3 50.5,36.8 56.0,33.0 61.6,26.7 67.2,33.9 72.7,39.8 78.3,43.8 83.8,46.5 89.4,41.6 94.9,40.5 100.5,42.0 106.1,45.3 111.6,43.5 117.2,44.7 122.7,40.5 128.3,38.7 133.9,40.5 139.4,40.3 145.0,38.0 150.5,38.4 156.1,40.1 161.7,43.1 167.2,41.4 172.8,40.6 178.3,34.3 183.9,27.9 189.5,32.5 195.0,25.2 200.6,20.8 206.1,18.9 211.7,17.0 217.3,19.2 222.8,10.8 228.4,11.8 233.9,14.6 239.5,9.9 245.1,8.2 250.6,8.9 256.2,11.0 261.7,9.9 267.3,8.8 272.8,11.3 278.4,7.4 284.0,11.1 289.5,9.3 295.1,10.4 300.6,8.2 306.2,14.9 311.8,17.6 317.3,11.5 322.9,10.1 328.4,9.0 334.0,13.1' fill='none' stroke='#4fc3f7' stroke-width='2.2'/><circle cx='334.0' cy='13.1' r='4' fill='#4fc3f7'/></svg></div>
+</section><section class="card ">
+<div class="row"><span class="t">NDX 站上 20MA</span>
+<span class="badge">未達</span></div>
+<div class="big">55.5%</div>
+<div class="gap">還需下降 40.5 點</div>
+<div class="chart"><svg viewBox='0 0 340 56' preserveAspectRatio='none'><rect x='0' y='48.4' width='340' height='7.6' fill='rgba(255,82,82,.13)'/><line x1='0' x2='340' y1='48.4' y2='48.4' stroke='#ff5252' stroke-dasharray='4 4'/><polyline points='6.0,17.4 11.6,17.4 17.1,18.3 22.7,17.4 28.2,17.4 33.8,19.1 39.4,23.2 44.9,25.6 50.5,29.7 56.0,28.9 61.6,30.5 67.2,33.0 72.7,34.6 78.3,37.9 83.8,42.8 89.4,40.3 94.9,38.7 100.5,41.9 106.1,44.4 111.6,33.8 117.2,32.1 122.7,20.7 128.3,16.6 133.9,21.5 139.4,19.9 145.0,15.8 150.5,15.0 156.1,18.3 161.7,19.9 167.2,24.0 172.8,19.9 178.3,12.5 183.9,10.9 189.5,15.8 195.0,8.5 200.6,7.6 206.1,13.4 211.7,15.0 217.3,16.6 222.8,12.5 228.4,19.9 233.9,19.9 239.5,16.6 245.1,13.4 250.6,19.9 256.2,21.5 261.7,16.6 267.3,12.5 272.8,13.4 278.4,18.3 284.0,22.4 289.5,19.9 295.1,23.2 300.6,16.6 306.2,23.2 311.8,28.1 317.3,19.1 322.9,18.3 328.4,12.5 334.0,15.0' fill='none' stroke='#b388ff' stroke-width='2.2'/><circle cx='334.0' cy='15.0' r='4' fill='#b388ff'/></svg></div>
+</section><section class="card ">
+<div class="row"><span class="t">SPX 回撤</span>
+<span class="badge">未達</span></div>
+<div class="big">2.9%</div>
+<div class="gap">還需再跌 7.1%</div>
+<div class="chart"><svg viewBox='0 0 340 56' preserveAspectRatio='none'><rect x='0' y='9.7' width='340' height='18.3' fill='rgba(255,82,82,.13)'/><polyline points='6.0,42.6 11.6,43.4 17.1,42.9 22.7,43.5 28.2,43.4 33.8,44.7 39.4,44.3 44.9,43.7 50.5,42.4 56.0,43.2 61.6,45.1 67.2,44.4 72.7,43.4 78.3,42.5 83.8,41.5 89.4,43.0 94.9,42.1 100.5,41.3 106.1,40.5 111.6,42.5 117.2,42.9 122.7,45.5 128.3,45.5 133.9,44.2 139.4,44.1 145.0,45.0 150.5,43.6 156.1,43.3 161.7,42.9 167.2,43.2 172.8,44.5 178.3,45.7 183.9,46.3 189.5,45.9 195.0,45.1 200.6,46.2 206.1,46.1 211.7,46.0 217.3,44.0 222.8,44.6 228.4,42.6 233.9,43.3 239.5,43.8 245.1,44.9 250.6,42.7 256.2,41.8 261.7,43.0 267.3,44.1 272.8,44.6 278.4,44.0 284.0,40.7 289.5,39.8 295.1,40.5 300.6,43.3 306.2,35.4 311.8,36.0 317.3,40.0 322.9,39.3 328.4,41.7 334.0,41.0' fill='none' stroke='#4fc3f7' stroke-width='2.2'/><circle cx='334.0' cy='41.0' r='4' fill='#4fc3f7'/></svg></div>
+</section><section class="card ">
+<div class="row"><span class="t">NDX 回撤</span>
+<span class="badge">未達</span></div>
+<div class="big">9.4%</div>
+<div class="gap">還需再跌 0.6%</div>
+<div class="chart"><svg viewBox='0 0 340 56' preserveAspectRatio='none'><rect x='0' y='9.7' width='340' height='18.3' fill='rgba(255,82,82,.13)'/><polyline points='6.0,37.7 11.6,38.2 17.1,36.5 22.7,37.7 28.2,37.8 33.8,40.2 39.4,39.0 44.9,39.1 50.5,36.9 56.0,37.3 61.6,39.3 67.2,39.7 72.7,39.4 78.3,38.9 83.8,37.0 89.4,38.6 94.9,37.2 100.5,36.0 106.1,36.1 111.6,39.1 117.2,40.2 122.7,45.3 128.3,46.3 133.9,44.8 139.4,44.8 145.0,45.6 150.5,43.6 156.1,44.0 161.7,44.4 167.2,45.0 172.8,46.3 178.3,46.3 183.9,46.3 189.5,45.9 195.0,43.4 200.6,44.3 206.1,43.1 211.7,42.5 217.3,38.9 222.8,38.8 228.4,34.4 233.9,36.4 239.5,36.2 245.1,38.1 250.6,33.0 256.2,33.0 261.7,34.9 267.3,37.1 272.8,38.0 278.4,35.6 284.0,29.7 289.5,27.3 295.1,28.5 300.6,30.0 306.2,19.4 311.8,21.5 317.3,26.9 322.9,25.9 328.4,29.6 334.0,29.1' fill='none' stroke='#b388ff' stroke-width='2.2'/><circle cx='334.0' cy='29.1' r='4' fill='#b388ff'/></svg></div>
+</section>
+  <section class="card"><div class='vt'><div class='bh'><span>⚡ 台指 VIX（期交所）× 台股背離（參考）</span><span><span class='dtag none'>無背離</span></span></div>
+<div class='bv'><div><small>判定日（共同交易日）</small><b>2026-11-13</b><small>兩邊日期已對齊</small></div>
+<div><small>台指 VIX 該日收盤</small><b style='color:#ff8a80'>37.84</b><small>-6.1%</small></div>
+<div><small>台股加權該日收盤</small><b style='color:#4fc3f7'>43,675</b><small>+1.4%</small></div></div>
+<svg viewBox='0 0 1100 110' preserveAspectRatio='none'><rect x='0' y='74.1' width='1100' height='35.9' fill='rgba(255,82,82,.13)'/><line x1='0' x2='1100' y1='74.1' y2='74.1' stroke='#ff5252' stroke-dasharray='4 4'/><polyline points='6.0,70.8 24.4,47.2 42.9,56.7 61.3,67.5 79.8,67.8 98.2,54.4 116.6,63.2 135.1,68.1 153.5,75.5 172.0,81.7 190.4,66.2 208.8,55.1 227.3,47.1 245.7,65.0 264.2,78.0 282.6,48.8 301.1,51.4 319.5,54.4 337.9,61.1 356.4,47.1 374.8,57.2 393.3,65.6 411.7,89.0 430.1,64.7 448.6,92.8 467.0,52.8 485.5,57.0 503.9,63.3 522.3,43.7 540.8,42.6 559.2,77.8 577.7,67.6 596.1,66.9 614.5,40.6 633.0,59.3 651.4,63.1 669.9,45.3 688.3,53.5 706.7,43.1 725.2,66.9 743.6,12.3 762.1,98.5 780.5,25.5 798.9,50.1 817.4,81.7 835.8,41.7 854.3,64.4 872.7,82.9 891.2,51.8 909.6,33.9 928.0,57.2 946.5,11.5 964.9,69.1 983.4,27.2 1001.8,14.7 1020.2,76.4 1038.7,83.8 1057.1,72.4 1075.6,46.0 1094.0,77.0' fill='none' stroke='#ff8a80' stroke-width='2.2'/><circle cx='1094.0' cy='77.0' r='4' fill='#ff8a80'/></svg><div class='m'>判定日 2026-11-13｜台股最新 11/13｜台指 VIX 最新 11/13（TAIWAN VIX，期交所官方收盤，非美國 VIX）｜台股來源 TWSE 官方收盤｜兩邊日期已對齊｜門檻（暫定）：台股跌且台指 VIX 跌≥5%／≥8%，各自對前一官方收盤｜不影響美股條件</div></div></section>
+  <section class="card"><div class='btc'><div class='bh'><span>₿ BTC vs Vaulted Realized</span><span class='pos dn'>線下 -53.6%</span></div>
+<div class='bv'><div><small>BTC 價格</small><b style='color:#ffb74d'>$68,108</b></div><div><small>Vaulted Realized</small><b style='color:#00e676'>$146,750</b></div><div><small>Vaulted MVRV</small><b>0.464</b></div></div>
+<svg viewBox='0 0 1100 110' preserveAspectRatio='none'><polyline points='4.0,13.9 22.5,13.9 41.0,13.9 59.5,13.9 78.0,13.8 96.5,13.8 115.1,13.6 133.6,13.1 152.1,13.1 170.6,13.0 189.1,12.9 207.6,12.9 226.1,12.9 244.6,12.8 263.1,12.7 281.6,12.7 300.1,12.6 318.6,12.4 337.2,12.5 355.7,12.4 374.2,12.3 392.7,12.1 411.2,12.0 429.7,11.9 448.2,11.9 466.7,11.9 485.2,11.8 503.7,11.8 522.2,11.7 540.7,11.8 559.3,11.8 577.8,11.7 596.3,11.7 614.8,11.8 633.3,11.7 651.8,11.7 670.3,11.6 688.8,11.1 707.3,11.0 725.8,11.1 744.3,11.1 762.8,11.1 781.4,11.1 799.9,11.1 818.4,11.1 836.9,11.2 855.4,11.1 873.9,11.2 892.4,11.2 910.9,11.2 929.4,11.2 947.9,11.2 966.4,11.3 984.9,11.4 1003.5,11.4 1022.0,11.5 1040.5,11.5 1059.0,11.5 1077.5,11.6 1096.0,11.8' fill='none' stroke='#00e676' stroke-width='2'/><polyline points='4.0,90.4 22.5,90.5 41.0,89.7 59.5,84.4 78.0,84.4 96.5,84.5 115.1,78.2 133.6,78.7 152.1,80.9 170.6,80.8 189.1,81.4 207.6,80.9 226.1,80.5 244.6,82.0 263.1,81.8 281.6,81.7 300.1,80.7 318.6,80.8 337.2,80.5 355.7,78.6 374.2,79.4 392.7,79.6 411.2,82.2 429.7,83.9 448.2,83.0 466.7,82.6 485.2,81.7 503.7,83.9 522.2,82.3 540.7,84.0 559.3,83.4 577.8,84.1 596.3,84.3 614.8,83.6 633.3,83.7 651.8,82.5 670.3,81.3 688.8,84.3 707.3,84.6 725.8,84.9 744.3,85.7 762.8,85.8 781.4,84.9 799.9,84.4 818.4,88.2 836.9,88.9 855.4,88.6 873.9,87.8 892.4,89.5 910.9,88.7 929.4,85.3 947.9,90.3 966.4,90.5 984.9,90.5 1003.5,91.6 1022.0,91.0 1040.5,92.8 1059.0,92.5 1077.5,95.3 1096.0,99.0' fill='none' stroke='#ffb74d' stroke-width='2'/><circle cx='1096.0' cy='99.0' r='3.5' fill='#ffb74d'/></svg><div class='m'>資料 2026-11-13｜Checkonchain｜僅供參考，不影響美股訊號</div></div></section>
+  <p class="muted">按下下方「更新」才會重抓數據。完整更新含美股寬度，可能要 1–3 分鐘；盤中快更只刷新台股與 VIX。僅供參考，非投資建議。</p>
+  <p class="hint">手機請連與 Mac 同一 Wi‑Fi，開啟此頁服務位址（見底部提示）。外網需另開 tunnel。</p>
+</div>
+<div class="bar">
+  <div class="bar-inner">
+    <button type="button" id="btnIntra">盤中快更</button>
+    <button type="button" id="btnFull">完整更新</button>
+    <button type="button" id="btnInstall">加到主畫面</button>
+    <p id="installTip"></p>
+  </div>
+  <div id="toast"></div>
+</div>
+<script>
+(function () {
+  const toast = document.getElementById('toast');
+  const btnFull = document.getElementById('btnFull');
+  const btnIntra = document.getElementById('btnIntra');
+  function setBusy(on, msg) {
+    btnFull.disabled = on; btnIntra.disabled = on;
+    toast.className = 'show';
+    toast.textContent = msg || (on ? '更新中…' : '');
+  }
+  function showErr(m) { toast.className = 'show err'; toast.textContent = m; }
+  function showOk(m) { toast.className = 'show ok'; toast.textContent = m; }
+  async function poll(jobId) {
+    for (let i = 0; i < 180; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const r = await fetch('/api/job?id=' + encodeURIComponent(jobId), { cache: 'no-store' });
+      if (!r.ok) throw new Error('查詢狀態失敗 HTTP ' + r.status);
+      const j = await r.json();
+      if (j.status === 'running') {
+        setBusy(true, '更新中… ' + (j.elapsed_sec || 0) + 's');
+        continue;
+      }
+      if (j.status === 'ok') {
+        showOk('完成，重新載入…');
+        setTimeout(() => location.reload(), 600);
+        return;
+      }
+      throw new Error(j.error || '更新失敗');
+    }
+    throw new Error('逾時，請稍後再試或看 Mac 上的 run.log');
+  }
+  async function start(mode) {
+    setBusy(true, mode === 'intraday' ? '盤中快更啟動…' : '完整更新啟動（可能需數分鐘）…');
+    try {
+      const r = await fetch('/api/update?mode=' + encodeURIComponent(mode), { method: 'POST' });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 409) {
+        showErr(j.error || '已有更新在跑');
+        if (j.job_id) await poll(j.job_id);
+        return;
+      }
+      if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      await poll(j.job_id);
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      if (location.protocol === 'file:') {
+        showErr('這是本機檔案，無法按更新。請用手機開 http://<Mac區網IP>:8765/');
+      } else if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+        showErr('連不上更新服務。請確認 Mac 上 dip_server 有開，且手機同一 Wi‑Fi。');
+      } else {
+        showErr(msg);
+      }
+      btnFull.disabled = false; btnIntra.disabled = false;
+    }
+  }
+  btnFull.addEventListener('click', () => start('daily'));
+  btnIntra.addEventListener('click', () => start('intraday'));
+  const btnInstall = document.getElementById('btnInstall');
+  const installTip = document.getElementById('installTip');
+  if (installTip) installTip.textContent = 'Chrome 右上 ⋮ →「安裝應用程式」或「新增至主畫面」。Tunnel 網址變更後需重新新增。';
+  let deferredPrompt = null;
+  const _bip = 'before' + 'install' + 'prompt';
+  window.addEventListener(_bip, (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    if (btnInstall) btnInstall.classList.add('show');
+    if (installTip) installTip.classList.remove('show');
+  });
+  window.addEventListener('appinstalled', () => {
+    deferredPrompt = null;
+    if (btnInstall) btnInstall.classList.remove('show');
+    if (installTip) installTip.classList.remove('show');
+  });
+  if (btnInstall) btnInstall.addEventListener('click', async () => {
+    if (!deferredPrompt) {
+      if (installTip) installTip.classList.add('show');
+      return;
+    }
+    deferredPrompt.prompt();
+    try { await deferredPrompt.userChoice; } catch (_) {}
+    deferredPrompt = null;
+    btnInstall.classList.remove('show');
+  });
+  setTimeout(() => {
+    const standalone = window.matchMedia('(display-mode: standalone)').matches;
+    if (!deferredPrompt && !standalone) {
+      if (installTip) installTip.classList.add('show');
+      if (btnInstall) btnInstall.classList.add('show');
+    }
+  }, 800);
+  // 啟動時若伺服器有寫入目前位址，顯示在 toast 旁
+  fetch('/api/info', { cache: 'no-store' }).then(r => r.json()).then(info => {
+    if (info && info.lan_urls && info.lan_urls.length) {
+      const el = document.querySelector('.hint');
+      if (el) el.innerHTML = '手機請開：<code>' + info.lan_urls[0] + '</code>（同一 Wi‑Fi）';
+    }
+  }).catch(() => {});
+})();
+</script>
+
+<script>
+(function(){
+  var W='https://dip-update.luke120513.workers.dev';
+  function msg(t,ok){var e=document.getElementById('toast');if(e){e.className='show '+(ok?'ok':'err');e.textContent=t;}}
+  var MAP={busy:'已有更新在進行中，請稍候',too_soon:'剛更新過，請 3 分鐘後再試'};
+  ['btnFull','btnIntra'].forEach(function(id){
+    var b=document.getElementById(id); if(!b) return;
+    var n=b.cloneNode(true); n.disabled=false;
+    if(id==='btnIntra'){ n.style.display='none'; } else { n.textContent='更新'; }
+    b.parentNode.replaceChild(n,b);
+    n.addEventListener('click',function(){
+      n.disabled=true; n.textContent='更新中…'; msg('已送出更新，約 1–2 分鐘…',true);
+      var t0=Date.now()-30000, start=Date.now();
+      function fail(t){n.disabled=false;n.textContent='更新';msg(t,false);}
+      function done(){msg('計算完成，等待網頁發佈…',true);setTimeout(function(){location.replace(location.pathname+'?t='+Date.now());},60000);}
+      function poll(){
+        if(Date.now()-start>900000) return fail('等候逾時，請稍後重新整理');
+        fetch(W+'/status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+          var r=d.run;
+          if(r&&Date.parse(r.created_at)>=t0&&r.status==='completed'){
+            if(r.conclusion==='success') return done();
+            return fail('更新失敗（'+r.conclusion+'）');
+          }
+          if(r&&Date.parse(r.created_at)>=t0) msg('更新中…（'+(r.status==='queued'?'排隊中':'計算中')+'）',true);
+          setTimeout(poll,5000);
+        }).catch(function(){setTimeout(poll,5000);});
+      }
+      fetch(W+'/trigger',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+        if(d.ok) return setTimeout(poll,5000);
+        if(d.error==='busy'&&d.run){t0=Date.parse(d.run.created_at);msg(MAP.busy,true);return setTimeout(poll,5000);}
+        fail(MAP[d.error]||('更新失敗：'+d.error));
+      }).catch(function(){fail('無法連線到更新服務');});
+    });
+  });
+  var tip=document.getElementById('installTip');
+  if(tip) tip.textContent='Chrome 右上 ⋮ →「安裝應用程式」或「新增至主畫面」。';
+})();
+</script>
+</body>
+</html>
